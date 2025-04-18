@@ -1,18 +1,17 @@
+use awedio::Sound;
 use clap::{Parser, Subcommand};
-use kokoros::{
-    tts::koko::{TTSKoko, TTSOpts},
-    utils::wav::{write_audio_chunk, WavHeader},
-};
+use kokoros::tts::koko::{TTSKoko, TTSOpts};
 use std::net::{IpAddr, SocketAddr};
 use std::{
     fs::{self},
-    io::Write,
+    sync::Arc,
 };
 use tokio::io::{AsyncBufReadExt, BufReader};
 
 #[derive(Subcommand, Debug)]
 enum Mode {
     /// Generate speech for a string of text
+    ///
     #[command(alias = "t", long_flag_alias = "text", short_flag_alias = 't')]
     Text {
         /// Text to generate speech for
@@ -204,17 +203,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let reader = BufReader::new(stdin);
                 let mut lines = reader.lines();
 
-                // Use std::io::stdout() for sync writing
-                let mut stdout = std::io::stdout();
-
                 eprintln!(
                     "Entering streaming mode. Type text and press Enter. Use Ctrl+D to exit."
                 );
 
-                // Write WAV header first
-                let header = WavHeader::new(1, 24000, 32);
-                header.write_header(&mut stdout)?;
-                stdout.flush()?;
+                let (mut manager, _backend) = awedio::start()?;
 
                 while let Some(line) = lines.next_line().await? {
                     let stripped_line = line.trim();
@@ -226,8 +219,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     match tts.tts_raw_audio(&stripped_line, &lan, &style, speed, initial_silence) {
                         Ok(raw_audio) => {
                             // Write the raw audio samples directly
-                            write_audio_chunk(&mut stdout, &raw_audio)?;
-                            stdout.flush()?;
+                            let s = Arc::new(
+                                raw_audio
+                                    .iter()
+                                    .map(|x| (x * i16::MAX as f32) as i16)
+                                    .collect::<Vec<_>>(),
+                            );
+
+                            let (sound, notifier) =
+                                awedio::sounds::MemorySound::from_samples(s, 1, 24000)
+                                    .with_completion_notifier();
+
+                            manager.play(Box::new(sound));
+                            let _ = notifier.recv().unwrap();
+
                             eprintln!("Audio written to stdout. Ready for another line of text.");
                         }
                         Err(e) => eprintln!("Error processing line: {}", e),
